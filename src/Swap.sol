@@ -120,4 +120,144 @@ contract SimpleSwap is IERC721Receiver {
             TransferHelper.safeTransfer(token1, msg.sender, refund1);
         }
     }
+
+    /// @notice Increases liquidity in the current range
+    /// @dev Pool must be initialized already to add liquidity
+    /// @param tokenId The id of the erc721 token
+    /// @param amount0 The amount to add of token0
+    /// @param amount1 The amount to add of token1
+    function increaseLiquidityCurrentRange(uint256 tokenId, uint256 amountAdd0, uint256 amountAdd1)
+        external
+        returns (uint128 liquidity, uint256 amount0, uint256 amount1)
+    {
+        INonfungiblePositionManager.IncreaseLiquidityParams memory params = INonfungiblePositionManager
+            .IncreaseLiquidityParams({
+            tokenId: tokenId,
+            amount0Desired: amountAdd0,
+            amount1Desired: amountAdd1,
+            amount0Min: 0,
+            amount1Min: 0,
+            deadline: block.timestamp
+        });
+
+        (liquidity, amount0, amount1) = nonfungiblePositionManager.increaseLiquidity(params);
+    }
+
+    /// @notice A function that decreases the current liquidity by half. An example to show how to call the `decreaseLiquidity` function defined in periphery.
+    /// @param tokenId The id of the erc721 token
+    /// @return amount0 The amount received back in token0
+    /// @return amount1 The amount returned back in token1
+    function decreaseLiquidityInHalf(uint256 tokenId) external returns (uint256 amount0, uint256 amount1) {
+        // caller must be the owner of the NFT
+        require(msg.sender == deposits[tokenId].owner, "Not the owner");
+        // get liquidity data for tokenId
+        uint128 liquidity = deposits[tokenId].liquidity;
+        uint128 halfLiquidity = liquidity / 2;
+
+        // amount0Min and amount1Min are price slippage checks
+        // if the amount received after burning is not greater than these minimums, transaction will fail
+        INonfungiblePositionManager.DecreaseLiquidityParams memory params = INonfungiblePositionManager
+            .DecreaseLiquidityParams({
+            tokenId: tokenId,
+            liquidity: halfLiquidity,
+            amount0Min: 0,
+            amount1Min: 0,
+            deadline: block.timestamp
+        });
+
+        nonfungiblePositionManager.decreaseLiquidity(params);
+
+        (amount0, amount1) = nonfungiblePositionManager.collect(
+            INonfungiblePositionManager.CollectParams({
+                tokenId: tokenId,
+                recipient: address(this),
+                amount0Max: type(uint128).max,
+                amount1Max: type(uint128).max
+            })
+        );
+
+        //send liquidity back to owner
+        _sendToOwner(tokenId, amount0, amount1);
+    }
+
+    /// @notice Transfers funds to owner of NFT
+    /// @param tokenId The id of the erc721
+    /// @param amount0 The amount of token0
+    /// @param amount1 The amount of token1
+    function _sendToOwner(uint256 tokenId, uint256 amount0, uint256 amount1) internal {
+        // get owner of contract
+        address owner = deposits[tokenId].owner;
+
+        address tokenA = deposits[tokenId].token0;
+        address tokenB = deposits[tokenId].token1;
+        // send collected fees to owner
+        TransferHelper.safeTransfer(tokenA, owner, amount0);
+        TransferHelper.safeTransfer(tokenB, owner, amount1);
+    }
+
+    /// @notice swapExactInputSingle swaps a fixed amount of DAI for a maximum possible amount of WETH9
+    /// using the DAI/WETH9 0.3% pool by calling `exactInputSingle` in the swap router.
+    /// @dev The calling address must approve this contract to spend at least `amountIn` worth of its DAI for this function to succeed.
+    /// @param amountIn The exact amount of DAI that will be swapped for WETH9.
+    /// @return amountOut The amount of WETH9 received.
+    function swapExactInputSingle(uint256 amountIn) external returns (uint256 amountOut) {
+        // msg.sender must approve this contract
+
+        // Transfer the specified amount of DAI to this contract.
+        TransferHelper.safeTransferFrom(token0, msg.sender, address(this), amountIn);
+
+        // Approve the router to spend DAI.
+        TransferHelper.safeApprove(token0, address(swapRouter), amountIn);
+        // Naively set amountOutMinimum to 0. In production, use an oracle or other data source to choose a safer value for amountOutMinimum.
+        // We also set the sqrtPriceLimitx96 to be 0 to ensure we swap our exact input amount.
+        ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
+            tokenIn: token0,
+            tokenOut: token1,
+            fee: feeTier,
+            recipient: msg.sender,
+            deadline: block.timestamp,
+            amountIn: amountIn,
+            amountOutMinimum: 0,
+            sqrtPriceLimitX96: 0
+        });
+
+        // The call to `exactInputSingle` executes the swap.
+        amountOut = swapRouter.exactInputSingle(params);
+    }
+
+    /// @notice swapExactOutputSingle swaps a minimum possible amount of DAI for a fixed amount of WETH.
+    /// @dev The calling address must approve this contract to spend its DAI for this function to succeed. As the amount of input DAI is variable,
+    /// the calling address will need to approve for a slightly higher amount, anticipating some variance.
+    /// @param amountOut The exact amount of WETH9 to receive from the swap.
+    /// @param amountInMaximum The amount of DAI we are willing to spend to receive the specified amount of WETH9.
+    /// @return amountIn The amount of DAI actually spent in the swap.
+    function swapExactOutputSingle(uint256 amountOut, uint256 amountInMaximum) external returns (uint256 amountIn) {
+        // Transfer the specified amount of DAI to this contract.
+        TransferHelper.safeTransferFrom(token0, msg.sender, address(this), amountInMaximum);
+
+        // Approve the router to spend the specified `amountInMaximum` of DAI.
+        // In production, you should choose the maximum amount to spend based on oracles or other data sources to achieve a better swap.
+        TransferHelper.safeApprove(token0, address(swapRouter), amountInMaximum);
+
+        ISwapRouter.ExactOutputSingleParams memory params = ISwapRouter.ExactOutputSingleParams({
+            tokenIn: token0,
+            tokenOut: token1,
+            fee: feeTier,
+            recipient: msg.sender,
+            deadline: block.timestamp,
+            amountOut: amountOut,
+            amountInMaximum: amountInMaximum,
+            sqrtPriceLimitX96: 0
+        });
+
+        // Executes the swap returning the amountIn needed to spend to receive the desired amountOut.
+        amountIn = swapRouter.exactOutputSingle(params);
+
+        // For exact output swaps, the amountInMaximum may not have all been spent.
+        // If the actual amount spent (amountIn) is less than the specified maximum amount, we must refund the msg.sender and approve the swapRouter to spend 0.
+        if (amountIn < amountInMaximum) {
+            TransferHelper.safeApprove(token0, address(swapRouter), 0);
+            TransferHelper.safeTransfer(token0, msg.sender, amountInMaximum - amountIn);
+        }
+    }
 }
