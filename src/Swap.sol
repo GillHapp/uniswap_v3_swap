@@ -1,15 +1,17 @@
 // SPDX-License-Identifier:MIT
-pragma solidity ^0.8.26;
+pragma solidity ^0.8.24;
 pragma abicoder v2;
 
 import "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
 import "@uniswap/v3-periphery/contracts/libraries/TransferHelper.sol";
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
+import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 
 contract SimpleSwap is IERC721Receiver {
     event PoolCreated(address indexed tokenA, address indexed tokenB, uint24 indexed fee, address pool);
+    event PoolInitialized(address indexed pool, uint160 sqrtPriceX96);
 
     ISwapRouter public immutable swapRouter = ISwapRouter(0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E);
     uint24 public constant feeTier = 3000;
@@ -35,7 +37,57 @@ contract SimpleSwap is IERC721Receiver {
         token1 = _token1;
     }
 
-    // create pool if it does not exist
+    // Create pool and initialize it if it doesn't exist
+    function createAndInitializePoolIfNecessary(address tokenA, address tokenB, uint24 fee, uint160 sqrtPriceX96)
+        external
+        returns (address pool)
+    {
+        pool = iUniswapV3Factory.getPool(tokenA, tokenB, fee);
+
+        if (pool == address(0)) {
+            pool = iUniswapV3Factory.createPool(tokenA, tokenB, fee);
+            emit PoolCreated(tokenA, tokenB, fee, pool);
+        }
+
+        // Check if pool needs initialization
+        (uint160 currentSqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
+
+        if (currentSqrtPriceX96 == 0) {
+            IUniswapV3Pool(pool).initialize(sqrtPriceX96);
+            emit PoolInitialized(pool, sqrtPriceX96);
+        }
+
+        require(pool != address(0), "Pool creation failed");
+        return pool;
+    }
+
+    // Helper function to calculate sqrtPriceX96 for a 1:10 ratio (1 token0 = 10 token1)
+    function getSqrtPriceX96For1to10Ratio() public pure returns (uint160) {
+        // For a 1:10 ratio, price = 10
+        // sqrtPrice = sqrt(10) ≈ 3.16227766
+        // sqrtPriceX96 = sqrtPrice * 2^96
+        return 250541448375047931186413801569; // This represents sqrt(10) * 2^96
+    }
+
+    // Helper function to get current tick from pool
+    function getCurrentTick() external view returns (int24) {
+        address poolAddress = iUniswapV3Factory.getPool(token0, token1, feeTier);
+        require(poolAddress != address(0), "Pool does not exist");
+
+        (, int24 tick,,,,,) = IUniswapV3Pool(poolAddress).slot0();
+        return tick;
+    }
+
+    // Helper function to calculate tick range around current price
+    function getTickRangeAroundCurrent(int24 tickDistance) external view returns (int24 lowerTick, int24 upperTick) {
+        int24 currentTick = this.getCurrentTick();
+        int24 tickSpacing = 60; // For 0.3% fee tier
+
+        lowerTick = ((currentTick - tickDistance) / tickSpacing) * tickSpacing;
+        upperTick = ((currentTick + tickDistance) / tickSpacing) * tickSpacing;
+    }
+
+    // create pool if it does not exist (keeping original function for compatibility)
     function createPoolIfNotExists(address tokenA, address tokenB, uint24 fee) external returns (address) {
         address pool = iUniswapV3Factory.createPool(tokenA, tokenB, fee);
         require(pool != address(0), "Pool creation failed");
@@ -70,20 +122,20 @@ contract SimpleSwap is IERC721Receiver {
     }
 
     // add liquidity
-
-    /// @notice Calls the mint function defined in periphery, mints the same amount of each token. For this example we are providing 1000 DAI and 1000 USDC in liquidity
-    /// @return tokenId The id of the newly minted ERC721
-    /// @return liquidity The amount of liquidity for the position
-    /// @return amount0 The amount of token0
-    /// @return amount1 The amount of token1
     function mintNewPosition(int24 _lowerTick, int24 _upperTick)
         external
         returns (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)
     {
-        // For this example, we will provide equal amounts of liquidity in both assets.
-        // Providing liquidity in both assets means liquidity will be earning fees and is considered in-range.
-        uint256 amount0ToMint = 1000;
-        uint256 amount1ToMint = 1000;
+        // Check if pool exists and is initialized
+        address poolAddress = iUniswapV3Factory.getPool(token0, token1, feeTier);
+        require(poolAddress != address(0), "Pool does not exist");
+
+        (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(poolAddress).slot0();
+        require(sqrtPriceX96 > 0, "Pool not initialized");
+
+        uint256 amount0ToMint = 100 * 10 ** 18;
+        uint256 amount1ToMint = 1000 * 10 ** 18;
+
         // Approve the position manager
         TransferHelper.safeApprove(token0, address(nonfungiblePositionManager), amount0ToMint);
         TransferHelper.safeApprove(token1, address(nonfungiblePositionManager), amount1ToMint);
@@ -102,12 +154,10 @@ contract SimpleSwap is IERC721Receiver {
             deadline: block.timestamp
         });
 
-        // Note that the pool defined by DAI/USDC and fee tier 0.3% must already be created and initialized in order to mint
         (tokenId, liquidity, amount0, amount1) = nonfungiblePositionManager.mint(params);
-        // Create a deposit
         _createDeposit(msg.sender, tokenId);
 
-        // Remove allowance and refund in both assets.
+        // Remove allowance and refund in both assets
         if (amount0 < amount0ToMint) {
             TransferHelper.safeApprove(token0, address(nonfungiblePositionManager), 0);
             uint256 refund0 = amount0ToMint - amount0;
