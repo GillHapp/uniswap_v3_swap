@@ -2,18 +2,22 @@
 pragma solidity ^0.8.24;
 pragma abicoder v2;
 
-import "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
+// import "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
+import "lib/swap-router-contracts/contracts/interfaces/IV3SwapRouter.sol";
 import "@uniswap/v3-periphery/contracts/libraries/TransferHelper.sol";
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 
+// ERC20/ERC20
+// Native/ERC20 => ETH =>  WETH
+
 contract SimpleSwap is IERC721Receiver {
     event PoolCreated(address indexed tokenA, address indexed tokenB, uint24 indexed fee, address pool);
     event PoolInitialized(address indexed pool, uint160 sqrtPriceX96);
 
-    ISwapRouter public immutable swapRouter = ISwapRouter(0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E);
+    IV3SwapRouter public immutable swapRouter = IV3SwapRouter(0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E);
     uint24 public constant feeTier = 3000;
     address public immutable token0;
     address public immutable token1;
@@ -53,10 +57,9 @@ contract SimpleSwap is IERC721Receiver {
         (uint160 currentSqrtPriceX96,,,,,,) = IUniswapV3Pool(pool).slot0();
 
         if (currentSqrtPriceX96 == 0) {
-            IUniswapV3Pool(pool).initialize(sqrtPriceX96);
+            IUniswapV3Pool(pool).initialize(sqrtPriceX96); // a/b 1:10
             emit PoolInitialized(pool, sqrtPriceX96);
         }
-
         require(pool != address(0), "Pool creation failed");
         return pool;
     }
@@ -121,6 +124,7 @@ contract SimpleSwap is IERC721Receiver {
         deposits[tokenId] = Deposit({owner: owner, liquidity: liquidity, token0: posToken0, token1: posToken1});
     }
 
+    // 1500 <=> 1800.
     // add liquidity
     function mintNewPosition(int24 _lowerTick, int24 _upperTick)
         external
@@ -139,7 +143,7 @@ contract SimpleSwap is IERC721Receiver {
         // Approve the position manager
         TransferHelper.safeApprove(token0, address(nonfungiblePositionManager), amount0ToMint);
         TransferHelper.safeApprove(token1, address(nonfungiblePositionManager), amount1ToMint);
-
+        // eth/usdc => 1:2000.  1600:1800
         INonfungiblePositionManager.MintParams memory params = INonfungiblePositionManager.MintParams({
             token0: token0,
             token1: token1,
@@ -170,16 +174,22 @@ contract SimpleSwap is IERC721Receiver {
             TransferHelper.safeTransfer(token1, msg.sender, refund1);
         }
     }
+    // Fixed version of increaseLiquidityCurrentRange function for SimpleSwap contract
+    // Replace the existing function in your contract with this one:
 
     /// @notice Increases liquidity in the current range
     /// @dev Pool must be initialized already to add liquidity
     /// @param tokenId The id of the erc721 token
-    /// @param amount0 The amount to add of token0
-    /// @param amount1 The amount to add of token1
+    /// @param amountAdd0 The amount to add of token0
+    /// @param amountAdd1 The amount to add of token1
     function increaseLiquidityCurrentRange(uint256 tokenId, uint256 amountAdd0, uint256 amountAdd1)
         external
         returns (uint128 liquidity, uint256 amount0, uint256 amount1)
     {
+        // IMPORTANT: Approve the position manager to spend tokens
+        TransferHelper.safeApprove(token0, address(nonfungiblePositionManager), amountAdd0);
+        TransferHelper.safeApprove(token1, address(nonfungiblePositionManager), amountAdd1);
+
         INonfungiblePositionManager.IncreaseLiquidityParams memory params = INonfungiblePositionManager
             .IncreaseLiquidityParams({
             tokenId: tokenId,
@@ -191,6 +201,22 @@ contract SimpleSwap is IERC721Receiver {
         });
 
         (liquidity, amount0, amount1) = nonfungiblePositionManager.increaseLiquidity(params);
+
+        // Update the deposit struct liquidity (this was also missing)
+        deposits[tokenId].liquidity += liquidity;
+
+        // Clean up approvals and refund unused tokens
+        if (amount0 < amountAdd0) {
+            TransferHelper.safeApprove(token0, address(nonfungiblePositionManager), 0);
+            uint256 refund0 = amountAdd0 - amount0;
+            TransferHelper.safeTransfer(token0, msg.sender, refund0);
+        }
+
+        if (amount1 < amountAdd1) {
+            TransferHelper.safeApprove(token1, address(nonfungiblePositionManager), 0);
+            uint256 refund1 = amountAdd1 - amount1;
+            TransferHelper.safeTransfer(token1, msg.sender, refund1);
+        }
     }
 
     /// @notice A function that decreases the current liquidity by half. An example to show how to call the `decreaseLiquidity` function defined in periphery.
@@ -251,36 +277,31 @@ contract SimpleSwap is IERC721Receiver {
     /// @param amountIn The exact amount of DAI that will be swapped for WETH9.
     /// @return amountOut The amount of WETH9 received.
     function swapExactInputSingle(uint256 amountIn) external returns (uint256 amountOut) {
-        // msg.sender must approve this contract
-
-        // Transfer the specified amount of DAI to this contract.
+        // Transfer token0 to this contract
         TransferHelper.safeTransferFrom(token0, msg.sender, address(this), amountIn);
 
-        // Approve the router to spend DAI.
+        // Approve the router to spend token0
         TransferHelper.safeApprove(token0, address(swapRouter), amountIn);
-        // Naively set amountOutMinimum to 0. In production, use an oracle or other data source to choose a safer value for amountOutMinimum.
-        // We also set the sqrtPriceLimitx96 to be 0 to ensure we swap our exact input amount.
-        ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
+
+        IV3SwapRouter.ExactInputSingleParams memory params = IV3SwapRouter.ExactInputSingleParams({
             tokenIn: token0,
             tokenOut: token1,
             fee: feeTier,
             recipient: msg.sender,
-            deadline: block.timestamp,
             amountIn: amountIn,
-            amountOutMinimum: 0,
+            amountOutMinimum: 0, // Set to 0 for simplicity, but should be set based on slippage tolerance
             sqrtPriceLimitX96: 0
         });
 
-        // The call to `exactInputSingle` executes the swap.
         amountOut = swapRouter.exactInputSingle(params);
     }
-
     /// @notice swapExactOutputSingle swaps a minimum possible amount of DAI for a fixed amount of WETH.
     /// @dev The calling address must approve this contract to spend its DAI for this function to succeed. As the amount of input DAI is variable,
     /// the calling address will need to approve for a slightly higher amount, anticipating some variance.
     /// @param amountOut The exact amount of WETH9 to receive from the swap.
     /// @param amountInMaximum The amount of DAI we are willing to spend to receive the specified amount of WETH9.
     /// @return amountIn The amount of DAI actually spent in the swap.
+
     function swapExactOutputSingle(uint256 amountOut, uint256 amountInMaximum) external returns (uint256 amountIn) {
         // Transfer the specified amount of DAI to this contract.
         TransferHelper.safeTransferFrom(token0, msg.sender, address(this), amountInMaximum);
@@ -289,12 +310,11 @@ contract SimpleSwap is IERC721Receiver {
         // In production, you should choose the maximum amount to spend based on oracles or other data sources to achieve a better swap.
         TransferHelper.safeApprove(token0, address(swapRouter), amountInMaximum);
 
-        ISwapRouter.ExactOutputSingleParams memory params = ISwapRouter.ExactOutputSingleParams({
+        IV3SwapRouter.ExactOutputSingleParams memory params = IV3SwapRouter.ExactOutputSingleParams({
             tokenIn: token0,
             tokenOut: token1,
             fee: feeTier,
             recipient: msg.sender,
-            deadline: block.timestamp,
             amountOut: amountOut,
             amountInMaximum: amountInMaximum,
             sqrtPriceLimitX96: 0
