@@ -21,7 +21,7 @@ contract SimpleSwapTest is Test {
         simpleSwap = new SimpleSwap(
             address(0x55C173e35d6E69F628cE1E612A5eDeA7E6a0D492), address(0xd492389905D6D1dAF45Ae1839cdB6f23d80C9067)
         );
-        // Fork mainnet
+        // Fork from Sepolia to use existing tokens
         vm.createSelectFork("https://sepolia.infura.io/v3/2de477c3b1b74816ae5475da6d289208");
 
         token0 = 0x55C173e35d6E69F628cE1E612A5eDeA7E6a0D492;
@@ -34,7 +34,7 @@ contract SimpleSwapTest is Test {
         // price = 1.0001^tick
         // tick = log(price) / log(1.0001)
         // For price = 10: tick ≈ 23027
-        if (price == 10) return 23027;
+        if (price == 10) return 23027;// a/b 1:10 
         if (price == 5) return 16094; // Lower bound
         if (price == 20) return 29956; // Upper bound
         return 23027; // Default for price = 10

@@ -134,6 +134,7 @@ contract SimpleSwap is IERC721Receiver {
         address poolAddress = iUniswapV3Factory.getPool(token0, token1, feeTier);
         require(poolAddress != address(0), "Pool does not exist");
 
+
         (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(poolAddress).slot0();
         require(sqrtPriceX96 > 0, "Pool not initialized");
 
@@ -276,6 +277,9 @@ contract SimpleSwap is IERC721Receiver {
     /// @dev The calling address must approve this contract to spend at least `amountIn` worth of its DAI for this function to succeed.
     /// @param amountIn The exact amount of DAI that will be swapped for WETH9.
     /// @return amountOut The amount of WETH9 received.
+
+
+    // a/b  a amountIn => b amountOut
     function swapExactInputSingle(uint256 amountIn) external returns (uint256 amountOut) {
         // Transfer token0 to this contract
         TransferHelper.safeTransferFrom(token0, msg.sender, address(this), amountIn);
